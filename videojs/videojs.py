@@ -1,15 +1,21 @@
 """ videojsXBlock main Python class"""
 
 import pkg_resources
+import time
+import re
+
 from django.template import Context, Template
 
 from xblock.core import XBlock
 from xblock.fields import Scope, Integer, String, Boolean
 from xblock.fragment import Fragment
-import time
 
 
-class videojsXBlock(XBlock):
+from webob.response import Response
+from xblock_django.mixins import FileUploadMixin
+
+
+class videojsXBlock(XBlock, FileUploadMixin):
     '''
     Icon of the XBlock. Values : [other (default), video, problem]
     '''
@@ -19,7 +25,7 @@ class videojsXBlock(XBlock):
     Fields
     '''
     display_name = String(display_name="Display Name",
-                          default="Video JS",
+                          default="Video",
                           scope=Scope.settings,
                           help="This name appears in the horizontal navigation at the top of the page.")
 
@@ -85,6 +91,20 @@ class videojsXBlock(XBlock):
         The primary view of the XBlock, shown to students
         when viewing courses.
         """
+        is_youtube = 'youtu' in self.url
+        is_vimeo = 'vimeo' in self.url
+        video_id = None
+
+        if is_youtube:
+            regex = '^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*'
+            pattern = re.compile(regex)
+            video_id = pattern.findall(self.url)[-1][-1]
+
+        if is_vimeo:
+            regex = '^.*(vimeo\.com\/)((channels\/[A-z]+\/)|(groups\/[A-z]+\/videos\/))?([0-9]+)'
+            pattern = re.compile(regex)
+            video_id = pattern.findall(self.url)[-1][-1]
+
         fullUrl = self.url
         if self.start_time != "" and self.end_time != "":
             fullUrl += "#t=" + self.start_time + "," + self.end_time
@@ -95,12 +115,17 @@ class videojsXBlock(XBlock):
 
         context = {
             'display_name': self.display_name,
+            'display_description': self.display_description,
+            'thumbnail_url': self.thumbnail_url,
             'url': fullUrl,
             'allow_download': self.allow_download,
             'source_text': self.source_text,
             'source_url': self.source_url,
             'subtitle_url': self.sub_title_url,
-            'id': time.time()
+            'id': time.time(),
+            'is_youtube': is_youtube,
+            'is_vimeo': is_vimeo,
+            'video_id': video_id
         }
         html = self.render_template('public/html/videojs_view.html', context)
 
@@ -109,11 +134,14 @@ class videojsXBlock(XBlock):
         frag.add_javascript(self.load_resource("public/js/video-js.min.js"))
 
         frag.add_css(self.load_resource("public/css/videojs.css"))
-        # frag.add_css_url(self.runtime.local_resource_url(self, 'public/css/video-js.css'))
-        # frag.add_javascript_url(self.runtime.local_resource_url(self, 'public/js/video-js.min.js'))
 
         frag.add_javascript(self.load_resource("public/js/videojs_view.js"))
         frag.initialize_js('videojsXBlockInitView')
+        if is_youtube:
+            frag.initialize_js('youtubeInit')
+        if is_vimeo:
+            frag.initialize_js('vimeoInit')
+
         return frag
 
     def studio_view(self, context=None):
@@ -123,6 +151,7 @@ class videojsXBlock(XBlock):
         """
         context = {
             'display_name': self.display_name,
+            'display_description': self.display_description,
             'url': self.url,
             'allow_download': self.allow_download,
             'source_text': self.source_text,
@@ -135,23 +164,19 @@ class videojsXBlock(XBlock):
 
         frag = Fragment(html)
         frag.add_javascript(self.load_resource("public/js/videojs_edit.js"))
-        # frag.add_javascript(self.load_resource("public/js/video-js.min.js"))
-        # frag.add_css(self.load_resource("public/css/video-js.css"))
-        #frag.add_resource_url(self.runtime.local_resource_url(self, 'public/font/vjs.eot'))
-        #frag.add_resource_url(self.runtime.local_resource_url(self, 'public/font/vjs.svg'), 'image/svg+xml')
-        #frag.add_resource_url(self.runtime.local_resource_url(self, 'public/font/vjs.ttf'))
-        #frag.add_resource_url(self.runtime.local_resource_url(self, 'public/font/vjs.woff'), 'application/x-font-woff')
-
         frag.add_resource_url(self.runtime.local_resource_url(self, 'public/img/loading.gif'), 'image/gif')
         frag.initialize_js('videojsXBlockInitStudio')
         return frag
 
-    @XBlock.json_handler
-    def save_videojs(self, data, suffix=''):
+    @XBlock.handler
+    def save_videojs(self, request, suffix=''):
         """
         The saving handler.
         """
+        data = request.POST
+
         self.display_name = data['display_name']
+        self.display_description = data['display_description']
         self.url = data['url']
         self.allow_download = True if data['allow_download'] == "True" else False  # Str to Bool translation
         self.source_text = data['source_text']
@@ -160,9 +185,13 @@ class videojsXBlock(XBlock):
         self.end_time = ''.join(data['end_time'].split())  # Remove whitespace
         self.sub_title_url = data['sub_title']
 
-        return {
-            'result': 'success',
-        }
+        block_id = data['usage_id']
+        if not isinstance(data['thumbnail'], basestring):
+            upload = data['thumbnail']
+            self.thumbnail_url = self.upload_to_s3('THUMBNAIL', upload.file, block_id, self.thumbnail_url)
+
+        return Response(json_body={'result': 'success'})
+
 
     @XBlock.json_handler
     def tracking_log(self, data, suffix=''):
@@ -172,3 +201,18 @@ class videojsXBlock(XBlock):
         return {
             'result': 'success'
         }
+
+    @XBlock.handler
+    def upload_video(self, request, suffix=''):
+        data = request.POST
+
+        block_id = data['usage_id']
+        if not isinstance(data['fileupload'], basestring):
+            upload = data['fileupload']
+            url = self.upload_to_s3('VIDEO', upload.file, block_id, self.thumbnail_url)
+
+        if url is not None:
+            return Response(json_body={'result': 'success', 'url': url})
+
+        else:
+            return Response(json_body={'result': 'error'})
