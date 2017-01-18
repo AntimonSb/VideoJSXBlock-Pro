@@ -1,13 +1,54 @@
 /* Javascript for videojsXBlock. */
-var urls = new Array();
-var players = new Array();
+var urls = [];
+var players = [];
+var player;
+var youtubePlayerHandler;
+var vimeoPlayerHandler;
+var iframeMessaging = {
+    inactivityTimer: undefined,
+    isPausedOrFinished: false,
+    isBlocked: false,
+    activeWhileBlocked: false
+};
+
+function hideToolbars() {
+    parent.postMessage(JSON.stringify({action: 'hideToolbars'}), '*');
+}
+
+function showToolbars() {
+    // don't send too many messages
+    if (!iframeMessaging.isBlocked) {
+        parent.postMessage(JSON.stringify({
+            action: 'showToolbars',
+            setTimer: !iframeMessaging.isPausedOrFinished
+        }), '*');
+
+        iframeMessaging.isBlocked = true;
+
+        setTimeout(function () {
+            iframeMessaging.isBlocked = false;
+            if (iframeMessaging.activeWhileBlocked) {
+                iframeMessaging.activeWhileBlocked = false;
+                showToolbars();
+            }
+        }, 500);
+    } else {
+        iframeMessaging.activeWhileBlocked = true;
+    }
+}
 
 function videojsXBlockInitView(runtime, element) {
+
     /* Weird behaviour :
      * In the LMS, element is the DOM container.
      * In the CMS, element is the jQuery object associated*
      * So here I make sure element is the jQuery object */
     if (element.innerHTML) element = $(element);
+
+    // send signal to show toolbars
+    element.on('mousemove', showToolbars);
+    element.on('scroll', showToolbars);
+    element.on('keypress', showToolbars);
 
     //urls.push(runtime.handlerUrl(element, 'tracking_log'));
     var handlerUrl = runtime.handlerUrl(element, 'tracking_log');
@@ -16,52 +57,138 @@ function videojsXBlockInitView(runtime, element) {
     var currentTime = 0;
 
     var video = element.find('video');
-    for (var i = 0; i < video.size(); i++) {
-        videojs(video.get(i), {playbackRates: [0.75, 1, 1.25, 1.5, 1.75, 2]}, function () {
-            players[this.id()] = handlerUrl;
-            console.log(players);
-            this.on('timeupdate', function () {
-                previousTime = currentTime;
-                currentTime = this.currentTime();
-                if (this.seeking()) {//Math.round()
-                    var msg = "{'id':'" + get_xblock_id(players[this.id()]) + "','old_time':" + previousTime + ",'new_time':" + currentTime + ",'type':'onSlideSeek','code':'html5'}";
-                    send_msg(players[this.id()], msg, 'seek_video');
-                }
-            });
-            this.on('pause', function () {
-                var msg = "{'id':'" + get_xblock_id(players[this.id()]) + "','currentTime':" + currentTime + ",'code':'html5'}";
-                send_msg(players[this.id()], msg, 'pause_video');
-            });
-            this.on('play', function () {
-                var msg = "{'id':'" + get_xblock_id(players[this.id()]) + "','currentTime':" + currentTime + ",'code':'html5'}";
-                send_msg(players[this.id()], msg, 'play_video')
-            });
-            this.on('ended', function () {
-                var msg = "{'id':'" + get_xblock_id(players[this.id()]) + "','currentTime':" + currentTime + ",'code':'html5'}";
-                send_msg(players[this.id()], msg, 'stop_video')
-            });
-            this.on('loadstart', function () {
-                var msg = "{'id':'" + get_xblock_id(players[this.id()]) + "','code':'html5'}";
-                console.log(msg);
-                send_msg(players[this.id()], msg, 'load_video')
-            })
+
+    var options = {
+        "controls": true,
+        "controlBar": {
+            "muteToggle": false,
+            "playToggle": true,
+            "volumeControl": false,
+            "fullscreenToggle": false,
+            "currentTimeDisplay": false,
+            "timeDivider": false,
+            "durationDisplay": false,
+            "remainingTimeDisplay": false,
+            "playbackRateMenuButton": false
+        }
+    };
+
+    videojs(video[0], options, function () {
+        players[this.id()] = handlerUrl;
+        this.on('timeupdate', function () {
+            previousTime = currentTime;
+            currentTime = this.currentTime();
+            if (this.seeking()) {
+                var msg = "{'id':'" + get_xblock_id(players[this.id()]) + "','old_time':" + previousTime + ",'new_time':" + currentTime + ",'type':'onSlideSeek','code':'html5'}";
+                send_msg(players[this.id()], msg, 'seek_video');
+            }
+        });
+        this.on('pause', function () {
+            var msg = "{'id':'" + get_xblock_id(players[this.id()]) + "','currentTime':" + currentTime + ",'code':'html5'}";
+            send_msg(players[this.id()], msg, 'pause_video');
+        });
+        this.on('play', function () {
+            var msg = "{'id':'" + get_xblock_id(players[this.id()]) + "','currentTime':" + currentTime + ",'code':'html5'}";
+            send_msg(players[this.id()], msg, 'play_video');
+        });
+        this.on('ended', function () {
+            var msg = "{'id':'" + get_xblock_id(players[this.id()]) + "','currentTime':" + currentTime + ",'code':'html5'}";
+            send_msg(players[this.id()], msg, 'stop_video');
+        });
+        this.on('loadstart', function () {
+            var msg = "{'id':'" + get_xblock_id(players[this.id()]) + "','code':'html5'}";
+            send_msg(players[this.id()], msg, 'load_video');
+        });
+
+        enableMessaging();
+        sendMessage({action: 'isMuted'});
+        sendMessage({action: 'areCaptionsVisible'});
+        setCuePosition($('video')[0]);
+    });
+}
+
+function sendMessage(data) {
+    parent.postMessage(JSON.stringify(data), '*');
+}
+
+function enableMessaging() {
+    function handleIframeMessage(event) {
+        var message = JSON.parse(event.data);
+        var $video = $('video')[0];
+        switch (message.action) {
+            case 'mute':
+                $video.muted = true;
+                break;
+
+            case 'unmute':
+                $video.muted = false;
+                break;
+
+            case 'toggleCaptions':
+                toggleCaptions(message.data.visible);
+                break;
+        }
+    }
+
+    window.addEventListener('message', handleIframeMessage, false);
+}
+
+function getTrack($video) {
+    if ($video.textTracks && $video.textTracks[0]) {
+        return $video.textTracks[0];
+    } else {
+        return null;
+    }
+}
+
+function toggleCaptions(visible) {
+    var tracks = getTrack($('video')[0]);
+    if (tracks) {
+        tracks.mode = visible ? "showing" : "hidden";
+    }
+}
+
+function setCuePosition(video) {
+    var trackElements = $(video).find('track');
+    // for each track element
+    for (var i = 0; i < trackElements.length; i++) {
+        trackElements[i].addEventListener('load', function () {
+            //var textTrack = this.track; // gotcha: "this" is an HTMLTrackElement, not a TextTrack object
+            var textTrack = getTrack(video);
+            for (var j = 0; j < textTrack.cues.length; j++) {
+                var cue = textTrack.cues[j];
+                cue.line = 60;
+            }
         });
     }
 }
 
 function get_xblock_id(url) {
-    console.log('get_xblock_id_start');
     return url.slice(url.lastIndexOf('@') + 1, url.indexOf('/handler'));
 }
 
 function send_msg(url, msg, type) {
-    console.log('send_msg_start');
+    // notify parent that the video has started
+    switch (type) {
+        case 'play_video':
+            iframeMessaging.isPausedOrFinished = false;
+            hideToolbars();
+            break;
+        case 'pause_video':
+            iframeMessaging.isPausedOrFinished = true;
+            showToolbars();
+            break;
+        case 'ended':
+            iframeMessaging.isPausedOrFinished = true;
+            showToolbars();
+            break;
+    }
+
     $.ajax({
         type: "POST",
         url: url,
         data: JSON.stringify({msg: msg, type: type}),
         success: function (result) {
-            console.log(result);
             if (result['result'] == 'success') {
                 return 1;
             } else {
@@ -69,5 +196,133 @@ function send_msg(url, msg, type) {
             }
         }
     });
-    console.log('send_msg_end');
+}
+
+// YOUTUBE FUNCTIONS
+
+function youtubeInit(runtime, element) {
+    if (element.innerHTML) element = $(element);
+
+    youtubePlayerHandler = runtime.handlerUrl(element, 'tracking_log');
+
+    var tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    var firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+}
+
+function onYouTubeIframeAPIReady() {
+    var videoId = $('#player').attr('data-video');
+
+    player = new YT.Player('player', {
+        height: window.innerHeight * 0.8,
+        width: window.innerWidth * 0.8,
+
+        videoId: videoId,
+        events: {
+            'onReady': onPlayerReady,
+            'onStateChange': onPlayerStateChange
+        }
+    });
+}
+
+function onPlayerStateChange(event) {
+    switch (event.data) {
+        case YT.PlayerState.PLAYING:
+            var msg = "{'id':'" + get_xblock_id(youtubePlayerHandler) + "','currentTime':" + player.getCurrentTime() + ",'code':'youtube'}";
+            send_msg(youtubePlayerHandler, msg, 'play_video')
+            break;
+        case YT.PlayerState.PAUSED:
+            var msg = "{'id':'" + get_xblock_id(youtubePlayerHandler) + "','currentTime':" + player.getCurrentTime() + ",'code':'youtube'}";
+            send_msg(youtubePlayerHandler, msg, 'pause_video');
+            break;
+        case YT.PlayerState.ENDED:
+            var msg = "{'id':'" + get_xblock_id(youtubePlayerHandler) + "','currentTime':" + player.getCurrentTime() + ",'code':'youtube'}";
+            send_msg(youtubePlayerHandler, msg, 'stop_video');
+            break;
+        default:
+            return;
+    }
+}
+
+function onPlayerReady(event) {
+    event.target.setVolume(100);
+    event.target.playVideo();
+}
+
+// VIMEO FUNCTIONS
+
+function vimeoInit(runtime, element) {
+    $(function () {
+        var player = $('#player_1');
+        var playerOrigin = '*';
+        vimeoPlayerHandler = runtime.handlerUrl(element, 'tracking_log');
+
+        // Listen for messages from the player
+        if (window.addEventListener) {
+            window.addEventListener('message', onMessageReceived, false);
+        }
+        else {
+            window.attachEvent('onmessage', onMessageReceived, false);
+        }
+
+        // Handle messages received from the player
+        function onMessageReceived(event) {
+            // Handle messages from the vimeo player only
+            if (!(/^https?:\/\/player.vimeo.com/).test(event.origin)) {
+                return false;
+            }
+
+            if (playerOrigin === '*') {
+                playerOrigin = event.origin;
+            }
+
+            var data = JSON.parse(event.data);
+
+            switch (data.event) {
+                case 'ready':
+                    onReady();
+                    break;
+
+                case 'play':
+                    onPlay(data.data);
+                    break;
+
+                case 'pause':
+                    onPause(data.data);
+                    break;
+
+                case 'seeked':
+                    onSeek(data.data);
+                    break;
+
+                case 'finish':
+                    onFinish(data.data);
+                    break;
+            }
+        }
+
+        function onReady() {
+        }
+
+        function onPlay(data) {
+            var msg = "{'id':'" + get_xblock_id(vimeoPlayerHandler) + "','currentTime':" + data.seconds + ",'code':'vimeo'}";
+            send_msg(vimeoPlayerHandler, msg, 'play_video')
+        }
+
+        function onPause(data) {
+            var msg = "{'id':'" + get_xblock_id(vimeoPlayerHandler) + "','currentTime':" + data.seconds + ",'code':'vimeo'}";
+            send_msg(vimeoPlayerHandler, msg, 'pause_video')
+        }
+
+        function onSeek(data) {
+            var msg = "{'id':'" + get_xblock_id(vimeoPlayerHandler) + "','old_time':0,'new_time':" + data.seconds + ",'type':'onSlideSeek','code':'vimeo'}";
+            send_msg(vimeoPlayerHandler, msg, 'pause_video')
+        }
+
+        function onFinish(data) {
+            var msg = "{'id':'" + get_xblock_id(vimeoPlayerHandler) + "','currentTime':" + data.seconds + ",'code':'vimeo'}";
+            send_msg(vimeoPlayerHandler, msg, 'finish_video')
+        }
+    });
 }
